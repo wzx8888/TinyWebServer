@@ -1,0 +1,308 @@
+Webbench - Simple Web Benchmark 1.5
+Copyright (c) Radim Kolar 1997-2004, GPL Open Source Software.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Benchmarking: GET http://127.0.0.1:9006/judge.html
+100 clients, running 10 sec.
+
+Speed=556434 pages/min, 1038699 bytes/sec.
+Requests: 92739 susceed, 0 failed.
