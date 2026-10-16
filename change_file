@@ -1,0 +1,677 @@
+TinyWebServer 增加论坛业务 —— 改造流程
+============================================================
+
+目标
+------------------------------------------------------------
+在现有 TinyWebServer 上增加「用户 + 文章 + 评论 + 关注」论坛业务，
+对应 4 张表，覆盖 1:n（user→article、user→comment、article→comment）
+与 n:n 自关联（user↔user follow）。
+
+约束：
+  * 保持纯 C++ + mysqlclient 技术栈，不引入第三方库
+  * 保持现有 epoll + 线程池 + 定时器 + 连接池架构不变
+  * 每个阶段结束后服务必须能正常启动、原有注册登录功能不回归
+
+结论：可以实现。但工作量的大头在【阶段 0 地基】，不在写业务接口。
+阶段 0 不做，阶段 2 写不下去。
+
+
+现状基线（动手前必须知道的事实）
+------------------------------------------------------------
+┌────────────────────────────────────────────┬──────────────────────────┬─────────────────────────────────────┐
+│ 事实                                       │ 位置                     │ 对论坛的影响                        │
+├────────────────────────────────────────────┼──────────────────────────┼─────────────────────────────────────┤
+│ 没有真正的 CGI，cgi 只是"是不是 POST"标志  │ http_conn.cpp:256        │ 路由靠 URL 末段首字符硬编码分发     │
+│ 路由约定 0/1/2/3/5/6/7 各占一个字符        │ http_conn.cpp:396-495    │ 字符空间不够用论坛接口              │
+│ 表单解析写死偏移 user= / &password=        │ http_conn.cpp:409-417    │ 完全无法复用，必须重写              │
+│ 全局 map 缓存整张 user 表                  │ http_conn.cpp:17-18,20-50│ 没有 user_id，无法做外键            │
+│ 登录只查内存 map，不查库                   │ http_conn.cpp:452        │ 库改数据不重启不生效                │
+│ 无 session / cookie                        │ 全局                     │ 无法识别"当前请求是谁"              │
+│ 响应只能吐 mmap 的静态文件                 │ process_write:655-670    │ 装不下动态帖子列表                  │
+│ WRITE_BUFFER_SIZE = 1024（响应头+body）    │ http_conn.h:34           │ 动态 body 超限会静默失败            │
+│ READ_BUFFER_SIZE = 2048（请求体）          │ http_conn.h:33           │ 正文稍长就解析错                    │
+│ add_content 溢出时返回 false 无告警        │ http_conn.cpp:588-593    │ 症状是连接直接断，极难排查          │
+│ 响应头不带 Content-Type                    │ http_conn.cpp:604        │ 动态 HTML 被浏览器嗅探              │
+│ SQL 全靠字符串拼接                         │ http_conn.cpp:425-441    │ 论坛任意文本必被注入                │
+│ 注册重名检查在锁外                         │ http_conn.cpp:433-438    │ 并发同名注册双写库                  │
+│ sizeof(http_conn)=3960B，MAX_FD=65536      │ webserver.h:18           │ 启动即占 247MB，扩容要算内存        │
+│ 连接池不设置连接字符集                     │ sql_connection_pool.cpp  │ 中文标题/正文会乱码（关键）         │
+│ m_users 成员是死代码（实际用全局 users）   │ http_conn.h:143          │ 清理时别改错对象                    │
+└────────────────────────────────────────────┴──────────────────────────┴─────────────────────────────────────┘
+
+数据库现状（已实测）：
+  MySQL 8.0.45，库 yourdb，表 user 只有两列：
+    username char(50) / passwd char(50)
+  无主键、无唯一键、密码明文、charset=utf8mb4
+  → 图上设计的 user 表是【改造】现有表，不是新建表
+
+
+阶段总览
+------------------------------------------------------------
+  阶段 0  地基（阻塞项，必须先做）    0.1 → 0.8
+  阶段 1  库表改造                    1.1 → 1.4
+  阶段 2  业务接口（逐个交付）        2.1 → 2.7
+  阶段 3  安全与工程化                3.1 → 3.6
+  阶段 4  回归与压测                  4.1 → 4.3
+
+  依赖关系：0 全部完成后才能进 1 和 2；2.1 完成后才能做 2.2 及以后；
+            2.2 完成后才能做 2.3/2.4；2.6 完成后才能做 2.7。
+
+
+============================================================
+阶段 0：地基（阻塞项）
+============================================================
+
+------------------------------------------------------------
+0.1  通用 POST 表单解析器
+------------------------------------------------------------
+涉及文件：http/http_conn.h、http/http_conn.cpp
+         （建议新增 http/form_parser.h / form_parser.cpp）
+
+现状：http_conn.cpp:409-417 用
+        for (i = 5; m_string[i] != '&'; ++i) name[i-5] = m_string[i];
+        for (i = i + 10; ...)                password[j] = m_string[i];
+      写死了 "user=" 的 5 字节和 "&password=" 的 10 字节偏移。
+
+改动：
+  1) 新增函数，签名建议：
+       std::map<std::string, std::string> parse_form(const char* body, size_t len);
+  2) 解析规则：
+       - 按 '&' 切分成 k=v 对
+       - 每对按【第一个】'=' 切成 key / value（value 里允许出现 '='）
+       - key 和 value 都做 URL 解码：'%XX' 还原成字节，'+' 还原成空格
+       - 解码后出现 '\0'（即 %00）直接丢弃该字段，不要让它截断字符串
+  3) 在 http_conn 中保存解析结果：成员 std::map<std::string,std::string> m_post；
+     parse_content() 里解析后 fill，供各 handler 使用。
+  4) 删除原有的硬编码偏移代码。
+
+为什么必须先做：论坛每个接口的参数（title / content / article_id）都要靠它。
+
+验证：
+  curl -i -X POST --data 'user=abc&password=123' http://127.0.0.1:9006/2CGISQL.cgi
+  curl -i -X POST --data 'title=a%3Db&content=x+y'  ...   # 检查 '=' 和 '+' 解码
+  原有注册/登录流程必须照常工作。
+
+------------------------------------------------------------
+0.2  Session / Cookie 会话管理
+------------------------------------------------------------
+涉及文件：新增 session/session_manager.h / session_manager.cpp
+         http/http_conn.h（加成员）、http/http_conn.cpp（解析 Cookie、下发 Set-Cookie）
+
+现状：完全没有。这是论坛所有写操作的前提。
+
+改动：
+  1) session_manager 单例（沿用项目 connection_pool 的单例写法）：
+       std::unordered_map<std::string, int> m_sessions;   // session_id -> user_id
+       locker m_lock;                                     // 复用 lock/locker.h
+  2) session_id 生成：读 /dev/urandom 取 32 字节，hex 编码成 64 字符。
+     不要用 rand()/time()，可预测。
+  3) 接口：
+       std::string create_session(int user_id);          // 登录/注册成功后调用
+       int         get_user_id(const std::string& sid);  // 未命中返回 -1
+       void        destroy_session(const std::string& sid); // 登出
+  4) http_conn 侧：
+       - parse_headers() 中提取 Cookie 头，解析出 SESSIONID 值存入 std::string m_session_id
+       - 每个请求开头调用 get_user_id() 得到 int m_user_id（-1 表示未登录）
+  5) 响应侧：登录/注册成功后追加响应头
+       Set-Cookie: SESSIONID=<id>; HttpOnly; Path=/\r\n
+     注意 Set-Cookie 必须走响应头，不能拼进 body；
+     add_headers() 目前在 http_conn.cpp:604，需要新增一个带 Set-Cookie 的分支或独立函数。
+  6) Cookie 属性：HttpOnly 必加；本次是 HTTP 不是 HTTPS，不要加 Secure，否则浏览器不保存。
+  7) 过期策略：第一版可以不做（服务重启即全部失效）。
+     若要做，存 last_active 时间戳并在 get_user_id 时惰性淘汰，
+     不要复用 lst_timer 的定时器（那是连接级定时器，语义不同，混用会出问题）。
+  8) 顺带删掉 http_conn.h:143 的 map<string,string> m_users（死代码）。
+
+注意：会话表在内存里，服务重启后所有用户需要重新登录 —— 这是可接受的，
+      但要在文档/README 里写明，别让面试官以为是 bug。
+
+验证：
+  curl -i -X POST --data 'user=abc&password=123' http://127.0.0.1:9006/2CGISQL.cgi
+    → 响应头出现 Set-Cookie: SESSIONID=...
+  curl -i -H 'Cookie: SESSIONID=...' http://127.0.0.1:9006/welcome.html
+    → 能取到 user_id（可临时在页面打印用户名来验证）
+
+------------------------------------------------------------
+0.3  登录/注册改为查库，清理全局用户缓存
+------------------------------------------------------------
+涉及文件：http/http_conn.cpp:17-50（全局 m_lock/users + initmysql_result）、
+         http_conn.cpp:425-455（注册/登录逻辑）、http_conn.h:143、
+         webserver.cpp:94（调用处）、webserver.h（声明）
+
+现状：
+  * http_conn.cpp:18 有全局 map<string,string> users，启动时 initmysql_result()
+    执行 SELECT username,passwd FROM user 全表灌入；
+  * 注册时同时写库和写这个 map；登录只比对 map，不查库；
+  * 后果：库里数据在服务运行期间不生效；map 里没有 user_id。
+
+改动：
+  1) 删除全局 map 与 initmysql_result()，以及 webserver.cpp:94 的调用
+     （否则启动时白做一次全表 SELECT，且把明文密码常驻内存）。
+  2) 注册（原 /3 路径）：
+       - 用 mysql_real_escape_string 转义 username/passwd
+       - INSERT INTO user(username, passwd, create_time) VALUES(...)
+         （create_time 交给 DEFAULT CURRENT_TIMESTAMP）
+       - 失败时判断 errno == 1062（ER_DUP_ENTRY）→ /registerError.html
+       - 成功 → 调 create_session(user_id)，用 mysql_insert_id() 拿新 id
+         → /log.html（0.2 完成后这里下发给 Set-Cookie）
+  3) 登录（原 /2 路径）：
+       - SELECT user_id, passwd FROM user WHERE username = '<escaped>'
+       - 命中且密码一致 → create_session(user_id) → /welcome.html
+       - 否则 → /logError.html
+  4) 竞态修复：重名判断不再依赖内存 map，交给数据库唯一键（见 1.1）。
+     这样并发同名注册只会有一条成功，另一条拿到 1062。
+
+验证：
+  用 mysql 命令行插入一个用户，不重启服务，直接用该用户登录 → 应成功。
+  （这是验收 0.3 是否真的做完的最好方法）
+
+------------------------------------------------------------
+0.4  SQL 注入防护
+------------------------------------------------------------
+涉及文件：新增 db/sql_util.h（工具函数）、所有拼 SQL 的地方
+
+改动：
+  1) 提供两个辅助函数：
+       std::string sql_escape(MYSQL* conn, const std::string& s);
+         → 内部调 mysql_real_escape_string，返回可安全放入单引号的字符串
+       long long to_ll(const std::string& s, long long def = -1);
+         → 字符串转整数，非数字返回 def
+  2) 硬性规则（写进注释，避免以后自己违反）：
+       - 字符串参数一律走 sql_escape 后放进单引号
+       - 数字参数（user_id / article_id）一律先 to_ll 转成整数再拼，
+         绝不直接拼原始字符串 —— 这样天然免疫注入
+       - 绝不复用 mysql_real_escape_string 要求连接有效这一前提之外的东西，
+         拿到 conn 之后再转义（本项目从 connectionRAII 里取）
+  3) 全项目搜索所有 strcat/strcpy 拼 SQL 的位置逐一改造。
+
+验证：
+  POST title=aa' OR '1'='1 等构造，确认不会造成语义变化/报错泄漏。
+
+------------------------------------------------------------
+0.5  动态响应体（让服务器能返回内存里的内容）
+------------------------------------------------------------
+涉及文件：http/http_conn.h、http/http_conn.cpp（do_request、process_write、write、unmap、init）
+
+现状：
+  * do_request 的本质是"把 m_url 改写成某个静态文件路径"，然后 mmap 出去；
+  * process_write()（http_conn.cpp:655-670）里 FILE_REQUEST 分支固定
+    m_iv[1].iov_base = m_file_address;
+  * 想返回动态内容只能走 add_content()，而它写进 1024 字节的 m_write_buf，
+    溢出时 add_response() 静默返回 false（http_conn.cpp:588-593），
+    最终表现为连接被直接关闭 —— 症状很难查。
+
+改动：
+  1) http_conn 增加成员：
+       std::string m_dyn_body;      // 动态响应体
+       bool        m_is_dynamic;    // 本次响应是否为动态
+  2) HTTP_CODE 枚举新增 DYNAMIC_REQUEST（http_conn.h:64-74，注意别打乱已有枚举值）
+  3) do_request() 中 handler 直接填 m_dyn_body 并 return DYNAMIC_REQUEST，
+     不再改写 m_url。
+  4) process_write() 增加分支：
+       add_status_line(200, ok_200_title);
+       add_content_type();                      // 现有代码从不调用它，动态 HTML 必须调
+       add_headers(m_dyn_body.size());
+       m_iv[0].iov_base = m_write_buf;  m_iv[0].iov_len = m_write_idx;
+       m_iv[1].iov_base = (void*)m_dyn_body.data(); m_iv[1].iov_len = m_dyn_body.size();
+       m_iv_count = 2;
+       bytes_to_send = m_write_idx + m_dyn_body.size();
+  5) 释放路径：
+       - unmap() 目前只处理 m_file_address（mmap 的），动态分支不要走 munmap
+       - m_dyn_body 是 std::string 成员，清楚时机放在 init() 重置里：
+         但必须保证 body 已发送完毕再清 —— write() 在 bytes_to_send==0 时
+         会调 init()，那是安全点，把 m_dyn_body.clear() 放这里。
+       - 本项目一个连接对应一个常驻 http_conn 对象（users 数组），
+         同一连接不会并发处理两个请求，所以 m_iv[1] 指向 string 内部缓冲是安全的。
+  6) 空 body（比如 204 响应）要单独处理，别让 m_iv[1].iov_len = 0 还挂一个 count=2。
+
+为什么要这么绕：因为 m_write_buf 只有 1024 字节，任何真实页面都放不下。
+
+验证：
+  临时做一个 handler 返回 5KB 的 HTML 字符串，浏览器能完整看到，不截断。
+
+------------------------------------------------------------
+0.6  路由改为表驱动
+------------------------------------------------------------
+涉及文件：http/http_conn.h、http/http_conn.cpp（do_request）
+
+现状：do_request 靠 *(p+1) == '2' 这类首字符比较分发，
+      未知 POST 路径会落到 else 分支去 stat 一个同名文件然后 404。
+
+改动：
+  1) 定义 handler 类型（项目风格偏 C-style，用函数指针或 std::function 都行）：
+       using Handler = std::function<HTTP_CODE(http_conn*, const std::string& url)>;
+  2) http_conn 增加 std::unordered_map<std::string, Handler> m_routes;
+     在 init() 或构造函数里注册（注意别每个请求都重建）。
+  3) 路由粒度：按完整路径匹配，也就是 m_url 原样。
+     建议新接口统一走 /api/ 前缀：
+       POST /api/register       POST /api/login
+       POST /api/logout
+       POST /api/article/create
+       GET  /api/article/list?page=N
+       GET  /api/article/detail?id=N
+       POST /api/comment/create
+       POST /api/follow         POST /api/unfollow
+       GET  /api/feed
+  4) 兼容旧路由：现有 html 的表单 action 是 "3CGISQL.cgi" 这种相对路径
+     （浏览器会 POST 到 /3CGISQL.cgi），把 /2CGISQL.cgi、/3CGISQL.cgi
+     注册成对应 handler 的别名，避免一次性改所有 html。
+     旧的 /0 /1 /5 /6 /7 静态跳转保留原逻辑不动。
+  5) 把 do_request() 拆成 do_request()（分发）+ 各 handler 函数，
+     业务代码从 do_request 里移出去。
+
+注意：GET 请求带查询串（/api/article/list?page=1）时，
+      parse_request_line 不会拆 '?'，需要在 handler 里自己按 '?' 切分。
+
+验证：
+  原有 6 个页面全部正常；未知路径返回 404 而不是崩。
+
+------------------------------------------------------------
+0.7  字符集与缓冲区（先测量，再决定）
+------------------------------------------------------------
+涉及文件：CGImysql/sql_connection_pool.cpp、http/http_conn.h
+
+改动 A —— 连接字符集（必做，否则中文全乱码）：
+  sql_connection_pool.cpp:38-45 只调了 mysql_init + mysql_real_connect，
+  没有设置连接字符集。库里是 utf8mb4，但连接用的是客户端库默认值，
+  全英文的用户名场景下没暴露问题，一写中文标题/正文就会乱码或报错。
+  修法（二选一）：
+    - connect 之前：mysql_options(con, MYSQL_SET_CHARSET_NAME, "utf8mb4");
+    - connect 之后：mysql_set_character_set(con, "utf8mb4");
+  两张表都改（初始化循环里那处）。
+
+改动 B —— 缓冲区扩容（必须算内存）：
+  实测 sizeof(http_conn) = 3960 字节，MAX_FD = 65536（webserver.h:18），
+  users = new http_conn[65536] 启动即占约 247 MB。
+  READ_BUFFER_SIZE 从 2048 提到 8192 会再多占约 390 MB（总计约 640 MB），
+  这个代价不能无脑接受。
+
+  建议方案（按优先级）：
+    1) 不加大数组。把正文读取改成累积式：read_once() 里按 Content-Length
+       分多次 read，拼进一个 std::string m_body，再解析。
+       内存按需增长，不影响 sizeof(http_conn)。
+    2) 若嫌麻烦，只把 READ_BUFFER_SIZE 提到 4096，并在业务层硬性限制
+       正文长度（比如 title ≤ 100、content ≤ 2000），超限返回 413/错误页。
+    3) 同时把 MAX_FD 从 65536 降到实际需要（比如 10240），
+       连接数上限本来也受限于 ulimit -n 和 sql_num。
+  结论：优先选 1，选 2 的话长度上限必须写死在代码里并有对应报错。
+
+改动 C —— 响应长度上限：
+  m_dyn_body 走 m_iv[1] 不受 WRITE_BUFFER_SIZE 限制，但响应头仍在
+  1024 字节内，够用。若以后要加多个 Set-Cookie 再评估。
+
+验证：
+  发一篇含中文、含 emoji 的文章，标题正文都正常显示。
+
+------------------------------------------------------------
+0.8  阶段 0 验收（全部通过才能进阶段 1）
+------------------------------------------------------------
+  [x] 注册 → 登录 → 进入 welcome.html，全流程正常
+  [x] 直接往库里插用户，不重启服务即可登录（证明 0.3 生效）
+  [x] 响应头有 Set-Cookie；带 Cookie 访问能识别出 user_id
+  [x] 密码里含 ' 或 % 等特殊字符，注册登录均正常（证明 0.1/0.4 生效）
+  [x] 新增一个返回 5KB 动态 HTML 的接口，浏览器完整显示（证明 0.5 生效）
+  [x] 中文标题不亂碼（证明 0.7-A 生效）
+  [x] 原有 6 个页面（judge/register/log/welcome/picture/video/fans）无回归
+
+
+============================================================
+阶段 1：库表改造
+============================================================
+
+------------------------------------------------------------
+1.1  user 表迁移（在现有表上改，不是新建）
+------------------------------------------------------------
+必须按顺序执行，每步之后检查一次：
+
+  -- 步骤 1：加自增主键列。老数据自动获得 user_id。
+  ALTER TABLE user ADD COLUMN user_id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST;
+
+  -- 步骤 2：检查重名。有重名先人工处理，否则下一步会失败。
+  SELECT username, COUNT(*) c FROM user GROUP BY username HAVING c > 1;
+
+  -- 步骤 3：username 收窄 + 加唯一键
+  ALTER TABLE user MODIFY username VARCHAR(64) NOT NULL;
+  ALTER TABLE user ADD UNIQUE KEY uk_username (username);
+
+  -- 步骤 4：补其余列
+  ALTER TABLE user ADD COLUMN email VARCHAR(128) NULL;
+  ALTER TABLE user ADD UNIQUE KEY uk_email (email);
+  ALTER TABLE user ADD COLUMN status TINYINT NOT NULL DEFAULT 1;
+  ALTER TABLE user ADD COLUMN create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+  -- 步骤 5：passwd 列现在是 char(50) 明文。本次先保持明文
+  --          （否则老账号无法登录），改为 VARCHAR(64) 留出 hash 长度：
+  ALTER TABLE user MODIFY passwd VARCHAR(64) NOT NULL;
+
+说明：
+  * uk_email 允许 NULL，MySQL 唯一索引允许多个 NULL，正好符合"邮箱可空"的需求
+  * 迁移完成后必须确认 0.3 已经删掉了 initmysql_result，
+    否则每次启动还会 SELECT 全表并残留明文密码
+
+------------------------------------------------------------
+1.2  新增 article / comment / follow
+------------------------------------------------------------
+注意：自关联外键（follow 的两列都指向 user.user_id）约束名必须不同。
+
+  CREATE TABLE article (
+    article_id  BIGINT       NOT NULL AUTO_INCREMENT,
+    user_id     BIGINT       NOT NULL,
+    title       VARCHAR(255) NOT NULL,
+    content     TEXT         NOT NULL,
+    view_count  INT          NOT NULL DEFAULT 0,
+    create_time DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (article_id),
+    KEY idx_user_time (user_id, create_time),
+    CONSTRAINT fk_article_user FOREIGN KEY (user_id) REFERENCES user(user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+  CREATE TABLE comment (
+    comment_id  BIGINT        NOT NULL AUTO_INCREMENT,
+    article_id  BIGINT        NOT NULL,
+    user_id     BIGINT        NOT NULL,
+    content     VARCHAR(1000) NOT NULL,
+    create_time DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (comment_id),
+    KEY idx_article_time (article_id, create_time),
+    KEY idx_user_time (user_id, create_time),
+    CONSTRAINT fk_comment_article FOREIGN KEY (article_id) REFERENCES article(article_id),
+    CONSTRAINT fk_comment_user    FOREIGN KEY (user_id)    REFERENCES user(user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+  CREATE TABLE follow (
+    follower_id BIGINT   NOT NULL,
+    followee_id BIGINT   NOT NULL,
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (follower_id, followee_id),
+    KEY idx_followee (followee_id),
+    CONSTRAINT fk_follow_follower FOREIGN KEY (follower_id) REFERENCES user(user_id),
+    CONSTRAINT fk_follow_followee FOREIGN KEY (followee_id) REFERENCES user(user_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+------------------------------------------------------------
+1.3  索引说明（为什么是这几个）
+------------------------------------------------------------
+  * follow 主键 (follower_id, followee_id)：
+      天然防止重复关注，重复 INSERT 直接报 1062
+  * follow 的 idx_followee：
+      主键最左前缀是 follower_id，"查我的粉丝"（WHERE followee_id=?）
+      用不上主键，不建这个索引会全表扫
+  * article 的 idx_user_time：
+      同时服务"查某人的文章"和"关注流"（JOIN + ORDER BY create_time DESC）
+  * comment 的 idx_article_time：
+      服务"文章详情页的评论列表"
+  * article 的 idx_create_time：（执行时补充，原计划没有）
+      服务首页列表 "ORDER BY create_time DESC LIMIT 20 OFFSET n"。
+      这是论坛最热的查询，没有它 MySQL 要全表扫 + filesort 才能取前 20 行。
+      idx_user_time 帮不上忙：它的最左前缀是 user_id，首页查询不带这个条件。
+  * 外键在 InnoDB 下会隐式建索引，但复合索引覆盖得更全，不要只依赖隐式索引
+
+------------------------------------------------------------
+1.4  阶段 1 验收
+------------------------------------------------------------
+  [x] SHOW CREATE TABLE 四张表，结构、索引、字符集符合预期
+  [x] 老用户仍然能登录（迁移没丢数据）
+  [x] 并发注册同名用户，DB 中只有一行（唯一键生效）
+  [x] DELETE 一个有文章的用户 → 因外键被拒绝（或者明确决定用 ON DELETE CASCADE，二选一）
+  [x] EXPLAIN 确认四条热查询真的走索引（执行时补充，见 excuted_item 阶段 1）
+
+
+============================================================
+阶段 2：业务接口（按顺序逐个交付）
+============================================================
+
+顺序原则：每个接口都依赖前一个的产出，不要并行开发。
+
+------------------------------------------------------------
+2.1  登录/注册接口收口（配合 0.2 / 0.3）
+------------------------------------------------------------
+依赖：阶段 0 全部、阶段 1.1
+产出：POST /api/register、POST /api/login、POST /api/logout
+      （同时保留 /2CGISQL.cgi、/3CGISQL.cgi 别名）
+要点：
+  * 成功后 create_session() + Set-Cookie
+  * 登出 destroy_session() + 让 Cookie 立即过期（Max-Age=0）
+  * 登录后的页面应显示当前用户名（需要能按 user_id 查 username）
+验收：注册→登录→登出→再访问受限页面被拒
+
+------------------------------------------------------------
+2.2  发文章
+------------------------------------------------------------
+依赖：2.1
+接口：POST /api/article/create  参数 title, content
+SQL ：INSERT INTO article(user_id, title, content) VALUES(?, ?, ?)
+要点：
+  * user_id 必须来自 session，绝不接受客户端传入（否则可冒充他人发帖）
+  * title/content 走 sql_escape；长度按 0.7 定的上限校验，超限返回错误页
+  * 成功后 302 跳转到详情页，或直接返回 200 + 新 id
+验收：发帖后在库里看到行，user_id 是登录用户
+
+------------------------------------------------------------
+2.3  文章列表（第一个真正需要动态响应的接口）
+------------------------------------------------------------
+依赖：2.2
+接口：GET /api/article/list?page=N   每页 20 条
+SQL ：SELECT article_id, title, user_id, view_count, create_time
+      FROM article ORDER BY create_time DESC LIMIT 20 OFFSET ?
+要点：
+  * 先按 0.5 的 DYNAMIC_REQUEST 返回内存 HTML
+  * page 参数用 to_ll 转整数并做边界校验（负数、超大值要拒绝）
+  * LIMIT/OFFSET 是拼整数，安全；不要拼字符串
+  * 渲染时对 title 做 HTML 转义（见 3.1），否则是存储型 XSS
+  * 列表页需要显示作者名 → JOIN user 或者按 user_id 二次查询
+验收：发 3 篇帖子，列表按时间倒序显示，翻页正确
+
+------------------------------------------------------------
+2.4  文章详情 + 评论列表
+------------------------------------------------------------
+依赖：2.3
+接口：GET /api/article/detail?id=N
+SQL ：SELECT * FROM article WHERE article_id = ?
+      SELECT c.*, u.username FROM comment c JOIN user u ON c.user_id = u.user_id
+        WHERE c.article_id = ? ORDER BY c.create_time ASC
+要点：
+  * view_count 自增：UPDATE article SET view_count = view_count + 1 WHERE article_id = ?
+    这是写热点，注意不要和详情查询放在同一个事务里（会拉长持锁时间）
+  * id 不存在要返回 404 页面，不能返回空页面
+验收：浏览他人的文章，view_count 递增；评论按时间正序
+
+------------------------------------------------------------
+2.5  发评论
+------------------------------------------------------------
+依赖：2.4
+接口：POST /api/comment/create  参数 article_id, content
+要点：
+  * 先校验 article_id 存在（外键也会拦，但报错信息不友好，要在应用层先查）
+  * user_id 来自 session
+  * content 走 sql_escape + HTML 转义 + 长度校验
+验收：评论出现在对应文章下方，且不能评论到不存在的文章
+
+------------------------------------------------------------
+2.6  关注 / 取关（幂等）
+------------------------------------------------------------
+依赖：2.1
+接口：POST /api/follow、POST /api/unfollow  参数 followee_id
+SQL ：INSERT IGNORE INTO follow(follower_id, followee_id) VALUES(?, ?)
+      DELETE FROM follow WHERE follower_id = ? AND followee_id = ?
+要点：
+  * 必须幂等：连点两下"关注"不能报错，第二次直接成功返回
+  * 禁止自己关注自己（followee_id == 当前 user_id 直接拒绝）
+  * followee_id 必须校验存在
+验收：关注/取关各点两次，结果一致，无报错
+
+------------------------------------------------------------
+2.7  关注流与计数
+------------------------------------------------------------
+依赖：2.6、2.2
+接口 A：GET /api/feed   我关注的人的文章，按时间倒序
+  SQL ：SELECT a.* FROM article a
+        JOIN follow f ON a.user_id = f.followee_id
+        WHERE f.follower_id = ? ORDER BY a.create_time DESC LIMIT 20 OFFSET ?
+接口 B：粉丝数 / 关注数 / 文章数
+  SQL ：SELECT COUNT(*) FROM follow WHERE followee_id = ?   -- 粉丝
+        SELECT COUNT(*) FROM follow WHERE follower_id = ?   -- 关注
+        SELECT COUNT(*) FROM article WHERE user_id = ?      -- 文章
+要点：
+  * 第一版直接用 COUNT(*)，有 idx_followee 和 idx_user_time 支撑，够用
+  * 数据量真上来了再考虑冗余计数列 + 事务更新，现在别过早优化
+  * 关注流只索引了 follower_id 前缀，JOIN 走 idx_followee，注意用 EXPLAIN 确认
+验收：A 关注 B，B 发帖，A 的 feed 里能看到；计数正确
+
+
+============================================================
+阶段 3：安全与工程化
+============================================================
+
+------------------------------------------------------------
+3.1  HTML 输出转义（必做，不是可选）
+------------------------------------------------------------
+凡是把用户内容渲染进 HTML 的地方（标题、正文、评论、用户名），
+必须转义 < > & " ' 五个字符。
+不做的后果：用户在标题里写 <script>...</script> 就是存储型 XSS。
+建议：加一个 html_escape(const std::string&) 工具函数，
+      所有渲染路径强制走它，在 code review 里当成硬性检查项。
+
+------------------------------------------------------------
+3.2  表单/接口的输入校验
+------------------------------------------------------------
+  * 所有长度限制在服务端做（前端的 required/maxlength 只是体验，不是防线）
+  * article_id / user_id / page 一律 to_ll 转整数后再用
+  * 拒绝 Content-Length 超过上限的请求（配合 0.7-B）
+
+------------------------------------------------------------
+3.3  事务
+------------------------------------------------------------
+一次请求内有多个写操作时（例如"发帖 + 更新用户文章数"）必须用事务：
+  START TRANSACTION → ... → COMMIT / ROLLBACK
+关键：所有语句必须走【同一个】connectionRAII 对象拿到的同一条连接，
+      从池子里取两次会拿到两条不同连接，事务不生效。这是最容易踩的坑。
+
+------------------------------------------------------------
+3.4  密码存储（可选，但面试常问）
+------------------------------------------------------------
+现状：明文入库。改造方案：
+  * 加一列 passwd_hash CHAR(64)
+  * 登录时对输入做 SHA256 比对 hash 列；老账号首次登录成功时补写 hash（渐进迁移）
+  * 不要用 MD5/SHA1；SHA256 无盐仍然弱，加分项是 bcrypt/scrypt，
+    但没有第三方库时 SHA256 + 每用户随机 salt 也是可接受的折中，记得说明取舍
+
+------------------------------------------------------------
+3.5  日志与隐私
+------------------------------------------------------------
+http_conn.cpp:598 的 LOG_INFO("request:%s", m_write_buf) 会把整个响应缓冲
+（包括 Set-Cookie 里的 session_id）写进日志文件。
+改成只记录请求行/状态码，不要把响应头和 Cookie 落盘。
+另外日志里也不要记录密码字段。
+
+------------------------------------------------------------
+3.6  会话过期（可选）
+------------------------------------------------------------
+上一版是"重启即全部失效"。要做得更正式：
+  * session 记录 last_active，get_user_id 时惰性淘汰超过 N 分钟未活动的会话
+  * 或者加一个低频清理（比如每 10 分钟一次），但不要挂在 lst_timer 的
+    连接定时器上，两者语义不同
+
+
+============================================================
+阶段 4：回归与压测
+============================================================
+
+------------------------------------------------------------
+4.1  功能回归
+------------------------------------------------------------
+  * 原有 6 个页面 + 图片/视频传输正常
+  * 注册→登录→发帖→评论→关注→feed 全链路走通
+  * 未登录访问 /api/article/create 等写接口被拒（返回 401/重定向到登录页）
+
+------------------------------------------------------------
+4.2  安全自查
+------------------------------------------------------------
+  * SQL 注入：title/content/username 里塞 ' " -- ; 等
+  * XSS：标题里塞 <script>alert(1)</script>，页面上应显示成文本
+  * 越权：改 article_id/user_id 参数，不能改到别人的数据
+  * session 伪造：随便编一个 SESSIONID 应被识别为未登录
+  * 超长输入：超长 title/content 应被友好拒绝，不是崩溃
+
+------------------------------------------------------------
+4.3  压测
+------------------------------------------------------------
+  * 复用现有 test_pressure/webbench-1.5 和 run_benchmark.sh
+  * 重点观察：
+      - 连接池 sql_num（默认 8，可用 -s 调）是否成为瓶颈
+      - 动态渲染接口（列表页）的耗时 vs 静态文件
+      - 关注流的 JOIN 在高并发下的表现，EXPLAIN 确认走索引
+  * 注意：sizeof(http_conn) × MAX_FD 是固定的大块内存占用，
+    做 0.7-B 扩容时先确认机器内存够
+
+
+============================================================
+关键风险清单（按严重程度）
+============================================================
+1. 没有 session 就动论坛 → 所有写接口都能冒充他人，等于没做权限
+2. SQL 拼接不加转义 → 论坛的任意文本输入直接是注入点
+3. 动态 body 走 add_content() → 超过 1024 字节静默失败，表现为连接莫名断开
+4. 连接池不设 utf8mb4 → 中文内容乱码，且是"时好时坏"式的难查问题
+5. 事务里从池子取了两次连接 → 事务静默失效，数据不一致
+6. 无脑扩大 READ_BUFFER_SIZE → 直接多占几百 MB 内存（已实测量化）
+7. 忘记删 initmysql_result 的调用 → 启动时白做全表 SELECT，明文密码常驻内存
+8. follow 表漏建 idx_followee → "查粉丝"全表扫
+9. 输出不转义 → 存储型 XSS
+
+
+============================================================
+进度勾选表
+============================================================
+阶段 0  地基
+  [x] 0.1 通用 POST 表单解析器
+  [x] 0.2 Session / Cookie 会话管理
+  [x] 0.3 登录注册改为查库 + 清理全局用户缓存
+  [x] 0.4 SQL 注入防护
+  [x] 0.5 动态响应体
+  [x] 0.6 路由表驱动
+  [x] 0.7 字符集与缓冲区
+  [x] 0.8 阶段 0 验收
+
+阶段 1  库表
+  [x] 1.1 user 表迁移
+  [x] 1.2 新增 article / comment / follow
+  [x] 1.3 索引确认
+  [x] 1.4 阶段 1 验收
+
+阶段 2  业务接口
+  [x] 2.1 登录/注册接口收口
+  [x] 2.2 发文章
+  [x] 2.3 文章列表
+  [x] 2.4 文章详情 + 评论列表
+  [x] 2.5 发评论
+  [x] 2.6 关注 / 取关
+  [x] 2.7 关注流与计数
+
+阶段 3  安全与工程化
+  [x] 3.1 HTML 输出转义   —— 提前到阶段 2 完成（2.3 渲染离不开它）
+  [x] 3.2 输入校验         —— 长度上限 + 413；方法两层校验（非法名 400 /
+                              未实现 501 + Allow）；写接口 post_only 405
+  [x] 3.3 事务             —— 当前无多语句写场景（InnoDB autocommit 下单条即原子），
+                              交付 db/transaction.h 的 RAII 保护 + 使用约束，
+                              并由 tx_test 复现"换一条连接事务静默失效"
+  [x] 3.4 密码存储（可选） —— 已做：SHA256 迭代 10000 轮 + 16 字节随机 salt，
+                              注册直接存散列，老账号首次登录顺手迁移并清空明文
+  [x] 3.5 日志与隐私       —— 请求行/Cookie/SQL 一律"留结构不留值"；
+                              顺带修掉日志初始化失败导致处理请求时崩溃
+  [x] 3.6 会话过期（可选） —— 已核对：24h 滑动 TTL + 惰性淘汰 + 10 万条上限；
+                              补 seq 次级排序键（同秒淘汰不再随机）、
+                              重登录销毁旧会话（防会话固定）
+
+阶段 4  回归与压测
+  [x] 4.1 功能回归 —— e2e_flow.py 51 项（注册→登录→发帖→评论→关注→feed→
+                              个人页→登出 全链路串起来，含"身份取自会话"
+                              的查库确认）+ t5 68 项
+  [x] 4.2 安全自查 —— security_probe.py 105 项（SQLi/XSS/越权/会话伪造/
+                              超长输入）+ t4 35 项（Cookie 属性、Origin 矩阵）
+  [x] 4.3 压测 —— 四路交叉对照（新/旧 × -g/-O2，消除顺序效应）确认代码回退
+                      约 2.4 倍、-O2 无关；并发扫描 + 每请求 CPU 定位到
+                      "不是算力是等待"，根因未找到，按用户指示不再深挖；
+                      change_file 点名的三问已答：连接池不是瓶颈、
+                      动态接口与静态页吞吐持平、关注流 JOIN 走索引
+                      （但 ORDER BY 有 filesort）；另做 ASan 全量复验
+                      316 项断言 0 报告。详见 excuted_item 末节
