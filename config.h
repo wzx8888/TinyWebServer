@@ -42,6 +42,10 @@ public:
 
     //并发模型选择
     int actor_model;
+
+    //监听地址。默认 127.0.0.1：TLS 由反向代理终止（见 deploy/），
+    //服务只监听回环才能保证外部流量必须过代理。用 -b 0.0.0.0 可直连。
+    string LISTEN_ADDR;
 };
 
 #endif

@@ -30,11 +30,18 @@ Config::Config(){
 
     //并发模型,默认是proactor
     actor_model = 0;
+
+    //监听地址,默认只监听回环
+    LISTEN_ADDR = "127.0.0.1";
 }
 
 void Config::parse_arg(int argc, char*argv[]){
     int opt;
-    const char *str = "p:l:m:o:s:t:c:a:";
+    // 每个选项后面都带冒号，表示"必须带参数"。
+    // 新增选项时记得同时改这里、config.h、main.cpp 的 init 调用
+    // 和 webserver.h/.cpp 的 init 签名 —— init 是位置参数，
+    // 漏改一处不会报错，只会让参数静默错位。
+    const char *str = "p:l:m:o:s:t:c:a:b:";
     while ((opt = getopt(argc, argv, str)) != -1)
     {
         switch (opt)
@@ -77,6 +84,11 @@ void Config::parse_arg(int argc, char*argv[]){
         case 'a':
         {
             actor_model = atoi(optarg);
+            break;
+        }
+        case 'b':
+        {
+            LISTEN_ADDR = optarg;
             break;
         }
         default:

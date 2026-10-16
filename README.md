@@ -153,14 +153,21 @@ Demo演示
     INSERT INTO user(username, passwd) VALUES('name', 'passwd');
     ```
 
-* 修改main.cpp中的数据库初始化信息
+* 数据库连接信息改为从环境变量读取（**不再改源码**）
 
-    ```C++
-    //数据库登录名,密码,库名
-    string user = "root";
-    string passwd = "root";
-    string databasename = "yourdb";
+    源码里没有任何真实凭据，服务启动时读这三个变量：
+
+    ```bash
+    export MYSQL_USER=<库账号>      # 必填
+    export MYSQL_PWD=<库口令>       # 必填
+    export MYSQL_DB=yourdb          # 选填，默认 yourdb
     ```
+
+    缺 `MYSQL_USER` / `MYSQL_PWD` 时服务会打印提示并退出，不会静默回落到某个默认口令 ——
+    "忘了导出变量"如果表现为认证失败或连错库，排查成本远高于直接报错。
+
+    本地图省事就写一个 `run-local.sh`（`chmod +x`，内容 `export` 上表三个变量后
+    `exec ./server "$@"`）。**这个文件已在 .gitignore 中**，因为它是唯一该存真实口令的地方。
 
 * build
 
@@ -171,20 +178,26 @@ Demo演示
 * 启动server
 
     ```C++
-    ./server
+    ./run-local.sh
     ```
+
+    注意：服务**默认只监听 127.0.0.1**。这是为了让 TLS 只能由前面的反向代理终止
+    （见 [deploy/README.md](deploy/README.md)）—— 如果能从别的机器直连后端，
+    就等于绕过 TLS，而且浏览器会把非 Secure 的会话 Cookie 一起带过去。
+    确实需要从别的机器访问时，显式加 `-b 0.0.0.0`。
 
 * 浏览器端
 
     ```C++
     ip:9006
     ```
+    （仅当用 `-b 0.0.0.0` 启动时才填真实 IP；默认配置下只能走 `http://127.0.0.1:9006`）
 
 个性化运行
 ------
 
 ```C++
-./server [-p port] [-l LOGWrite] [-m TRIGMode] [-o OPT_LINGER] [-s sql_num] [-t thread_num] [-c close_log] [-a actor_model]
+./server [-p port] [-l LOGWrite] [-m TRIGMode] [-o OPT_LINGER] [-s sql_num] [-t thread_num] [-c close_log] [-a actor_model] [-b listen_addr]
 ```
 
 温馨提示:以上参数不是非必须，不用全部使用，根据个人情况搭配选用即可.
@@ -212,11 +225,16 @@ Demo演示
 * -a，选择反应堆模型，默认Proactor
 	* 0，Proactor模型
 	* 1，Reactor模型
+* -b，监听地址（IPv4），只接受点分十进制
+	* 默认 127.0.0.1，即只监听回环
+	* 0.0.0.0，监听所有网卡。**只在本地压测等可信网段使用**，
+	  生产环境下它会让反向代理和 TLS 形同虚设
+	* 其它非法值（如 `localhost`、`::1`）会在启动时报错退出，不会静默退回默认值
 
 测试示例命令与含义
 
 ```C++
-./server -p 9007 -l 1 -m 0 -o 1 -s 10 -t 10 -c 1 -a 1
+./server -p 9007 -l 1 -m 0 -o 1 -s 10 -t 10 -c 1 -a 1 -b 0.0.0.0
 ```
 
 - [x] 端口9007
@@ -227,6 +245,7 @@ Demo演示
 - [x] 线程池内有10条线程
 - [x] 关闭日志
 - [x] Reactor反应堆模型
+- [x] 监听所有网卡（本机测试用；生产应保持默认的回环）
 
 庖丁解牛
 ------------

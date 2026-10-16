@@ -27,7 +27,8 @@ public:
 
     void init(int port , string user, string passWord, string databaseName,
               int log_write , int opt_linger, int trigmode, int sql_num,
-              int thread_num, int close_log, int actor_model);
+              int thread_num, int close_log, int actor_model,
+              string listen_addr);
 
     void thread_pool();
     void sql_pool();
@@ -74,6 +75,12 @@ public:
     int m_TRIGMode;
     int m_LISTENTrigmode;
     int m_CONNTrigmode;
+
+    // 监听地址。默认 127.0.0.1 —— 本服务只说 HTTP，TLS 由前面的反向代理终止
+    // （见 deploy/），所以只监听回环是这套部署方式成立的前提：
+    // 一旦绑到 0.0.0.0，内网里任何人都能绕过代理直接明文访问。
+    // 需要直连时用 -b 0.0.0.0 显式打开，等于主动放弃这层保护。
+    string m_listen_addr;
 
     //定时器相关
     client_data *users_timer;

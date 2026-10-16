@@ -42,6 +42,16 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 			LOG_ERROR("MySQL Error");
 			exit(1);
 		}
+
+		//必须在 connect 之前设置连接字符集。
+		//库表是 utf8mb4，但连接用的是客户端库默认字符集，
+		//不显式设置的话中文内容会乱码，mysql_real_escape_string 的转义也会不准。
+		if (mysql_options(con, MYSQL_SET_CHARSET_NAME, "utf8mb4") != 0)
+		{
+			LOG_ERROR("set charset utf8mb4 error");
+			exit(1);
+		}
+
 		con = mysql_real_connect(con, url.c_str(), User.c_str(), PassWord.c_str(), DBName.c_str(), Port, NULL, 0);
 
 		if (con == NULL)

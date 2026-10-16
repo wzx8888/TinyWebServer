@@ -28,8 +28,9 @@ WebServer::~WebServer()
     delete m_pool;
 }
 
-void WebServer::init(int port, string user, string passWord, string databaseName, int log_write, 
-                     int opt_linger, int trigmode, int sql_num, int thread_num, int close_log, int actor_model)
+void WebServer::init(int port, string user, string passWord, string databaseName, int log_write,
+                     int opt_linger, int trigmode, int sql_num, int thread_num, int close_log,
+                     int actor_model, string listen_addr)
 {
     m_port = port;
     m_user = user;
@@ -42,6 +43,7 @@ void WebServer::init(int port, string user, string passWord, string databaseName
     m_TRIGMode = trigmode;
     m_close_log = close_log;
     m_actormodel = actor_model;
+    m_listen_addr = listen_addr;
 }
 
 void WebServer::trig_mode()
@@ -77,10 +79,25 @@ void WebServer::log_write()
     if (0 == m_close_log)
     {
         //初始化日志
+        bool ok;
         if (1 == m_log_write)
-            Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 800);
+            ok = Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 800);
         else
-            Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 0);
+            ok = Log::get_instance()->init("./ServerLog", m_close_log, 2000, 800000, 0);
+
+        // init 失败（工作目录只读、磁盘满、权限不对）时 m_fp 是 NULL。
+        // 以前这里忽略返回值，后果是服务照常启动，然后在处理【某一个用户的请求】
+        // 时崩在 fputs 上 —— 排查方向会被带到业务代码去，而根因在启动那一刻。
+        // 明确要求记日志却记不了，就不该装作在记：直接退出并说清原因。
+        if (!ok)
+        {
+            char cwd[256] = {0};
+            if (getcwd(cwd, sizeof(cwd)) == NULL)
+                strcpy(cwd, "<?>");
+            fprintf(stderr, "log init failed: cannot open ./ServerLog in %s: %s\n",
+                    cwd, strerror(errno));
+            exit(1);
+        }
     }
 }
 
@@ -89,9 +106,6 @@ void WebServer::sql_pool()
     //初始化数据库连接池
     m_connPool = connection_pool::GetInstance();
     m_connPool->init("localhost", m_user, m_passWord, m_databaseName, 3306, m_sql_num, m_close_log);
-
-    //初始化数据库读取表
-    users->initmysql_result(m_connPool);
 }
 
 void WebServer::thread_pool()
@@ -122,13 +136,34 @@ void WebServer::eventListen()
     struct sockaddr_in address;
     bzero(&address, sizeof(address));
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(m_port);
+
+    // 绑定地址来自配置（默认 127.0.0.1），不再硬编码 INADDR_ANY。
+    // 这里必须自己判 inet_pton 的返回值：它失败时不会碰 address.sin_addr，
+    // 于是 bind 会去绑 0.0.0.0 —— 也就是"配置写错了反而把服务暴露到所有网卡上"，
+    // 这是最不该静默发生的一种失败。宁可拒绝启动。
+    if (m_listen_addr == "0.0.0.0")
+    {
+        address.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+    else if (inet_pton(AF_INET, m_listen_addr.c_str(), &address.sin_addr) != 1)
+    {
+        fprintf(stderr, "invalid listen address: '%s' (expect IPv4, e.g. 127.0.0.1 or 0.0.0.0)\n",
+                m_listen_addr.c_str());
+        exit(1);
+    }
 
     int flag = 1;
     setsockopt(m_listenfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
     ret = bind(m_listenfd, (struct sockaddr *)&address, sizeof(address));
-    assert(ret >= 0);
+    if (ret < 0)
+    {
+        // assert 在 -DNDEBUG 下会被编译掉，而"端口被占用"是部署时最常见的问题，
+        // 必须给出能直接看懂的信息，而不是一个被优化的断言或裸 errno。
+        fprintf(stderr, "bind %s:%d failed: %s\n", m_listen_addr.c_str(), m_port,
+                strerror(errno));
+        exit(1);
+    }
     ret = listen(m_listenfd, 5);
     assert(ret >= 0);
 
@@ -399,12 +434,6 @@ void WebServer::eventLoop()
                 if (false == flag)
                     continue;
             }
-            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-            {
-                //服务器端关闭连接，移除对应的定时器
-                util_timer *timer = users_timer[sockfd].timer;
-                deal_timer(timer, sockfd);
-            }
             //处理信号
             else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
             {
@@ -412,7 +441,17 @@ void WebServer::eventLoop()
                 if (false == flag)
                     LOG_ERROR("%s", "dealclientdata failure");
             }
-            //处理客户连接上接收到的数据
+            // 处理客户连接上接收到的数据。
+            //
+            // 【这一支必须在 EPOLLRDHUP 之前】
+            // 客户端的半关闭（发 FIN）会让内核同时上报 EPOLLIN 和 EPOLLRDHUP，
+            // 而"半关闭"只表示它不再发数据了，不表示它不要响应 ——
+            // 请求字节可能好端端躺在内核缓冲里等着我们读。
+            // 原来 RDHUP 分支排在前面，命中就无条件关连接，结果是：
+            // 凡是发完请求就关写方向的客户端（python 的 shutdown(SHUT_WR)、
+            // ncat、部分嵌入式 HTTP 客户端）一个字节的响应都收不到，
+            // 只看到 "Connection reset by peer"，而服务端连请求都没解析过。
+            // 改成先读后关：有数据就先照常处理，处理完自然会走到关闭路径。
             else if (events[i].events & EPOLLIN)
             {
                 dealwithread(sockfd);
@@ -420,6 +459,12 @@ void WebServer::eventLoop()
             else if (events[i].events & EPOLLOUT)
             {
                 dealwithwrite(sockfd);
+            }
+            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            {
+                //真的没数据可读了，才关连接并移除对应的定时器
+                util_timer *timer = users_timer[sockfd].timer;
+                deal_timer(timer, sockfd);
             }
         }
         if (timeout)

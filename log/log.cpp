@@ -100,14 +100,19 @@ void Log::write_log(int level, const char *format, ...)
 
     if (m_today != my_tm.tm_mday || m_count % m_split_lines == 0) //everyday log
     {
-        
+
         char new_log[256] = {0};
-        fflush(m_fp);
-        fclose(m_fp);
+        // m_fp 可能为 NULL（init 失败/没调过 init）。fflush(NULL) 是合法的，
+        // 但 fclose(NULL) 会崩，所以这里必须判空。
+        if (m_fp != NULL)
+        {
+            fflush(m_fp);
+            fclose(m_fp);
+        }
         char tail[16] = {0};
-       
+
         snprintf(tail, 16, "%d_%02d_%02d_", my_tm.tm_year + 1900, my_tm.tm_mon + 1, my_tm.tm_mday);
-       
+
         if (m_today != my_tm.tm_mday)
         {
             snprintf(new_log, 255, "%s%s%s", dir_name, tail, log_name);
@@ -148,7 +153,12 @@ void Log::write_log(int level, const char *format, ...)
     else
     {
         m_mutex.lock();
-        fputs(log_str.c_str(), m_fp);
+        // m_fp 为 NULL = 日志流没打开成功，或者调用方显式关掉了日志
+        // （session_manager 的 sess_log_error 就是不检查 m_close_log 直接调的）。
+        // 这一条日志宁可丢掉，也不能让 fputs(..., NULL) 把整个进程打崩 ——
+        // 记日志是辅助功能，不该有拖垮服务的能力。
+        if (m_fp != NULL)
+            fputs(log_str.c_str(), m_fp);
         m_mutex.unlock();
     }
 
@@ -159,6 +169,7 @@ void Log::flush(void)
 {
     m_mutex.lock();
     //强制刷新写入流缓冲区
-    fflush(m_fp);
+    if (m_fp != NULL)
+        fflush(m_fp);
     m_mutex.unlock();
 }
